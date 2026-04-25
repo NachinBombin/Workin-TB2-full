@@ -67,6 +67,31 @@ ENT.FadeDuration = 3.0
 ENT.MaxHP = 200
 
 -- ============================================================
+-- NET STRING
+-- ============================================================
+util.AddNetworkString("bombin_plane_damage_tier")
+
+-- ============================================================
+-- DAMAGE TIER HELPERS
+-- ============================================================
+
+local function CalcTier(hp, maxHP)
+    local frac = hp / maxHP
+    if frac > 0.66 then return 0
+    elseif frac > 0.33 then return 1
+    elseif frac > 0 then return 2
+    else return 3
+    end
+end
+
+local function BroadcastTier(ent, tier)
+    net.Start("bombin_plane_damage_tier")
+        net.WriteUInt(ent:EntIndex(), 16)
+        net.WriteUInt(tier, 2)
+    net.Broadcast()
+end
+
+-- ============================================================
 -- INITIALIZE
 -- ============================================================
 
@@ -108,7 +133,6 @@ function ENT:Initialize()
     self:SetRenderMode(RENDERMODE_TRANSALPHA)
     self:SetColor(Color(255, 255, 255, 0))
 
-    -- ---- HP ----
     self:SetNWInt("HP",    ENT.MaxHP)
     self:SetNWInt("MaxHP", ENT.MaxHP)
 
@@ -116,11 +140,9 @@ function ENT:Initialize()
     self:SetAngles(Angle(0, ang.y + 70, 0))
     self.ang = self:GetAngles()
 
-    -- ---- LAYER 1: Wind jitter ----
     self.JitterPhase     = math.Rand(0, math.pi * 2)
     self.JitterAmplitude = 8
 
-    -- ---- LAYER 2: Altitude drift ----
     self.AltDriftCurrent  = self.sky
     self.AltDriftTarget   = self.sky
     self.AltDriftNextPick = CurTime() + math.Rand(10, 25)
@@ -133,7 +155,6 @@ function ENT:Initialize()
         self.PhysObj:EnableGravity(false)
     end
 
-    -- ---- Global engine hum ----
     self.EngineLoop = CreateSound(game.GetWorld(), ENGINE_LOOP_SOUND)
     if self.EngineLoop then
         self.EngineLoop:SetSoundLevel(0)
@@ -142,7 +163,6 @@ function ENT:Initialize()
         self.EngineLoop:Play()
     end
 
-    -- Weapon state
     self.CurrentWeapon   = nil
     self.WeaponWindowEnd = 0
 
@@ -154,8 +174,8 @@ function ENT:Initialize()
     self.VIKHR_NextShot    = 0
     self.VIKHR_MuzzleIndex = 1
 
-    -- Destroyed flag (prevents double-kill)
     self.IsDestroyed = false
+    self.DamageTier  = 0
 
     if not HasGred() then
         self:Debug("WARNING: Gredwitch Base not detected — weapons disabled")
@@ -169,17 +189,19 @@ end
 -- ============================================================
 
 function ENT:OnTakeDamage(dmginfo)
-    -- Already dead, ignore
     if self.IsDestroyed then return end
-
-    -- Ignore crush damage — world collisions must never kill it
     if dmginfo:IsDamageType(DMG_CRUSH) then return end
 
     local hp = self:GetNWInt("HP", ENT.MaxHP)
     hp = hp - dmginfo:GetDamage()
     self:SetNWInt("HP", hp)
-
     self:Debug("Hit! HP remaining: " .. tostring(hp))
+
+    local tier = CalcTier(hp, ENT.MaxHP)
+    if tier ~= self.DamageTier then
+        self.DamageTier = tier
+        BroadcastTier(self, tier)
+    end
 
     if hp <= 0 then
         self:Debug("Shot down!")
@@ -193,7 +215,6 @@ function ENT:DestroyUAV()
 
     local pos = self:GetPos()
 
-    -- Explosion effects
     local ed1 = EffectData()
     ed1:SetOrigin(pos)
     ed1:SetScale(4) ed1:SetMagnitude(4) ed1:SetRadius(400)
@@ -211,7 +232,6 @@ function ENT:DestroyUAV()
 
     sound.Play("ambient/explosions/explode_8.wav", pos, 140, 90, 1.0)
 
-    -- Small blast radius on destruction — not a weapon, just crash damage
     util.BlastDamage(self, self, pos, 250, 80)
 
     self:Remove()
@@ -241,7 +261,6 @@ function ENT:Think()
         self.PhysObj:Wake()
     end
 
-    -- Fade in / fade out
     local age  = ct - self.SpawnTime
     local left = self.DieTime - ct
     local alpha = 255
@@ -267,14 +286,12 @@ function ENT:PhysicsUpdate(phys)
 
     local pos = self:GetPos()
 
-    -- ---- LAYER 2: Altitude drift ----
     if CurTime() >= self.AltDriftNextPick then
         self.AltDriftTarget   = self.sky + math.Rand(-self.AltDriftRange, self.AltDriftRange)
         self.AltDriftNextPick = CurTime() + math.Rand(10, 25)
     end
     self.AltDriftCurrent = Lerp(self.AltDriftLerp, self.AltDriftCurrent, self.AltDriftTarget)
 
-    -- ---- LAYER 1: Wind jitter ----
     self.JitterPhase = self.JitterPhase + 0.03
     local jitter     = math.sin(self.JitterPhase) * self.JitterAmplitude
 
@@ -286,10 +303,7 @@ function ENT:PhysicsUpdate(phys)
         phys:SetVelocity(self:GetForward() * self.Speed)
     end
 
-    -- ---- Orbit steering ----
-    local flatPos    = Vector(pos.x, pos.y, 0)
-    local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
-    local dist       = flatPos:Distance(flatCenter)
+    local dist = Vector(pos.x, pos.y, 0):Distance(Vector(self.CenterPos.x, self.CenterPos.y, 0))
 
     if dist > self.OrbitRadius and (self.TurnDelay or 0) < CurTime() then
         self.ang       = self.ang + Angle(0, 0.1, 0)
