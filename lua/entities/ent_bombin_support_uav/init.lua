@@ -11,7 +11,7 @@ local function HasGred()
 end
 
 -- ============================================================
--- ENGINE SOUND — Global terror hum (no falloff)
+-- ENGINE SOUND
 -- ============================================================
 
 local ENGINE_LOOP_SOUND = "lfs/spitfire/rpm_2.wav"
@@ -40,7 +40,6 @@ local SOUND_ROCKET_IDLE = "rocket_idle.wav"
 
 ENT.WeaponWindow = 10
 
--- [SLOT 1] S-8 / MAM-L salvo
 ENT.S8_Delay        = 0.4
 ENT.S8_Count        = 4
 ENT.S8_Scatter      = 800
@@ -49,7 +48,6 @@ ENT.S8_MuzzlePoints = {
     Vector(60,  70, -5),
 }
 
--- [SLOT 2] Vikhr / MAM-C ATGM
 ENT.VIKHR_Delay        = 4.0
 ENT.VIKHR_Count        = 2
 ENT.VIKHR_Scatter      = 60
@@ -103,6 +101,9 @@ function ENT:Initialize()
     self.OrbitRadius  = self:GetVar("OrbitRadius",  2800)
     self.SkyHeightAdd = self:GetVar("SkyHeightAdd", 2000)
 
+    -- Read MaxHP from the class table (safe here — ENT.MaxHP is set at file scope above)
+    self.MaxHP = ENT.MaxHP or 200
+
     if self.CallDir:LengthSqr() <= 1 then self.CallDir = Vector(1,0,0) end
     self.CallDir.z = 0
     self.CallDir:Normalize()
@@ -133,8 +134,9 @@ function ENT:Initialize()
     self:SetRenderMode(RENDERMODE_TRANSALPHA)
     self:SetColor(Color(255, 255, 255, 0))
 
-    self:SetNWInt("HP",    ENT.MaxHP)
-    self:SetNWInt("MaxHP", ENT.MaxHP)
+    -- FIX: use self.MaxHP (set above), not ENT.MaxHP (nil when called via ogfunc at spawn)
+    self:SetNWInt("HP",    self.MaxHP)
+    self:SetNWInt("MaxHP", self.MaxHP)
 
     local ang = self.CallDir:Angle()
     self:SetAngles(Angle(0, ang.y + 70, 0))
@@ -192,12 +194,13 @@ function ENT:OnTakeDamage(dmginfo)
     if self.IsDestroyed then return end
     if dmginfo:IsDamageType(DMG_CRUSH) then return end
 
-    local hp = self:GetNWInt("HP", ENT.MaxHP)
+    -- FIX: use self.MaxHP (set in Initialize), not ENT.MaxHP (nil at call time)
+    local hp = self:GetNWInt("HP", self.MaxHP)
     hp = hp - dmginfo:GetDamage()
     self:SetNWInt("HP", hp)
     self:Debug("Hit! HP remaining: " .. tostring(hp))
 
-    local tier = CalcTier(hp, ENT.MaxHP)
+    local tier = CalcTier(hp, self.MaxHP)
     if tier ~= self.DamageTier then
         self.DamageTier = tier
         BroadcastTier(self, tier)
@@ -278,7 +281,7 @@ function ENT:Think()
 end
 
 -- ============================================================
--- FLIGHT — PhysicsUpdate
+-- FLIGHT
 -- ============================================================
 
 function ENT:PhysicsUpdate(phys)
@@ -396,7 +399,7 @@ function ENT:PickNewWeapon(ct)
 end
 
 -- ============================================================
--- SLOT 1 — MAM-L / S-8 style salvo  (gb_s8kom_rocket)
+-- SLOT 1 — MAM-L / S-8 salvo  (gb_s8kom_rocket)
 -- ============================================================
 
 function ENT:UpdateS8Salvo(ct)
@@ -441,7 +444,6 @@ function ENT:UpdateS8Salvo(ct)
     end
 
     self:SpawnMuzzleFX(muzzlePos)
-
     sound.Play(table.Random(SOUNDS_ATGM_IGNITE), muzzlePos, 110, math.random(95, 105), 1.0)
 
     timer.Simple(0.1, function()
@@ -479,7 +481,7 @@ function ENT:UpdateS8Salvo(ct)
 end
 
 -- ============================================================
--- SLOT 2 — MAM-C / Vikhr style ATGM  (gb_9k121_rocket)
+-- SLOT 2 — MAM-C / Vikhr ATGM  (gb_9k121_rocket)
 -- ============================================================
 
 function ENT:UpdateVikhr(ct)
@@ -548,7 +550,6 @@ function ENT:UpdateVikhr(ct)
     end)
 
     self:SpawnMuzzleFX(muzzlePos)
-
     sound.Play(table.Random(SOUNDS_ATGM_IGNITE), muzzlePos, 0, 100, 1.0)
 
     timer.Simple(0.1, function()
