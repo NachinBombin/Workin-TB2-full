@@ -35,34 +35,29 @@ local SOUNDS_LAUNCH = {
 local SOUND_ROCKET_IDLE = "rocket_idle.wav"
 
 -- ============================================================
--- WEAPON TUNING
+-- WEAPON TUNING  (locals — safe under ogfunc, ENT global is nil at file-exec time)
 -- ============================================================
 
-ENT.WeaponWindow = 10
+local CFG_WeaponWindow = 10
 
-ENT.S8_Delay        = 0.4
-ENT.S8_Count        = 4
-ENT.S8_Scatter      = 800
-ENT.S8_MuzzlePoints = {
+local CFG_S8_Delay        = 0.4
+local CFG_S8_Count        = 4
+local CFG_S8_Scatter      = 800
+local CFG_S8_MuzzlePoints = {
     Vector(60, -70, -5),
     Vector(60,  70, -5),
 }
 
-ENT.VIKHR_Delay        = 4.0
-ENT.VIKHR_Count        = 2
-ENT.VIKHR_Scatter      = 60
-ENT.VIKHR_MuzzlePoints = {
+local CFG_VIKHR_Delay        = 4.0
+local CFG_VIKHR_Count        = 2
+local CFG_VIKHR_Scatter      = 60
+local CFG_VIKHR_MuzzlePoints = {
     Vector(60, -70, -5),
     Vector(60,  70, -5),
 }
 
-ENT.FadeDuration = 3.0
-
--- ============================================================
--- HP TUNING
--- ============================================================
-
-ENT.MaxHP = 200
+local CFG_FadeDuration = 3.0
+local CFG_MaxHP        = 200
 
 -- ============================================================
 -- NET STRING
@@ -101,8 +96,19 @@ function ENT:Initialize()
     self.OrbitRadius  = self:GetVar("OrbitRadius",  2800)
     self.SkyHeightAdd = self:GetVar("SkyHeightAdd", 2000)
 
-    -- Read MaxHP from the class table (safe here — ENT.MaxHP is set at file scope above)
-    self.MaxHP = ENT.MaxHP or 200
+    self.MaxHP        = CFG_MaxHP
+    self.WeaponWindow = CFG_WeaponWindow
+    self.FadeDuration = CFG_FadeDuration
+
+    self.S8_Delay        = CFG_S8_Delay
+    self.S8_Count        = CFG_S8_Count
+    self.S8_Scatter      = CFG_S8_Scatter
+    self.S8_MuzzlePoints = CFG_S8_MuzzlePoints
+
+    self.VIKHR_Delay        = CFG_VIKHR_Delay
+    self.VIKHR_Count        = CFG_VIKHR_Count
+    self.VIKHR_Scatter      = CFG_VIKHR_Scatter
+    self.VIKHR_MuzzlePoints = CFG_VIKHR_MuzzlePoints
 
     if self.CallDir:LengthSqr() <= 1 then self.CallDir = Vector(1,0,0) end
     self.CallDir.z = 0
@@ -134,7 +140,6 @@ function ENT:Initialize()
     self:SetRenderMode(RENDERMODE_TRANSALPHA)
     self:SetColor(Color(255, 255, 255, 0))
 
-    -- FIX: use self.MaxHP (set above), not ENT.MaxHP (nil when called via ogfunc at spawn)
     self:SetNWInt("HP",    self.MaxHP)
     self:SetNWInt("MaxHP", self.MaxHP)
 
@@ -194,7 +199,6 @@ function ENT:OnTakeDamage(dmginfo)
     if self.IsDestroyed then return end
     if dmginfo:IsDamageType(DMG_CRUSH) then return end
 
-    -- FIX: use self.MaxHP (set in Initialize), not ENT.MaxHP (nil at call time)
     local hp = self:GetNWInt("HP", self.MaxHP)
     hp = hp - dmginfo:GetDamage()
     self:SetNWInt("HP", hp)
@@ -522,7 +526,7 @@ function ENT:UpdateVikhr(ct)
     local startpos = self:LocalToWorld(self:OBBCenter())
     local tr = util.TraceHull({
         start  = startpos,
-        endpos  = startpos + dir * 500000,
+        endpos = startpos + dir * 500000,
         mins   = Vector(-25, -25, -25),
         maxs   = Vector( 25,  25,  25),
         filter = self,
