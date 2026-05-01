@@ -2,11 +2,6 @@ AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
 
--- Permanent yaw correction so the TB-2 mesh faces the direction of travel.
--- This offset is ALWAYS added on top of flightYaw and must never be removed
--- or overridden by flight steering logic.
-local MODEL_YAW_OFFSET = 70
-
 -- ============================================================
 -- GRED GUARD
 -- ============================================================
@@ -122,8 +117,8 @@ function ENT:Initialize()
     local ground = self:FindGround(self.CenterPos)
     if ground == -1 then self:Debug("FindGround failed") self:Remove() return end
 
-    self.sky       = ground + self.SkyHeightAdd
-    self.DieTime   = CurTime() + self.Lifetime
+    self.sky      = ground + self.SkyHeightAdd
+    self.DieTime  = CurTime() + self.Lifetime
     self.SpawnTime = CurTime()
 
     local spawnPos = self.CenterPos - self.CallDir * 2000
@@ -148,12 +143,9 @@ function ENT:Initialize()
     self:SetNWInt("HP",    self.MaxHP)
     self:SetNWInt("MaxHP", self.MaxHP)
 
-    -- flightYaw is the pure travel direction.
-    -- self.ang.y is always flightYaw + MODEL_YAW_OFFSET so the mesh faces forward.
-    self.flightYaw = self.CallDir:Angle().y
-    self.PrevYaw   = self.flightYaw
-    self.ang       = Angle(0, self.flightYaw + MODEL_YAW_OFFSET, 0)
-    self:SetAngles(self.ang)
+    local ang = self.CallDir:Angle()
+    self:SetAngles(Angle(0, ang.y + 70, 0))
+    self.ang = self:GetAngles()
 
     self.JitterPhase     = math.Rand(0, math.pi * 2)
     self.JitterAmplitude = 8
@@ -163,9 +155,6 @@ function ENT:Initialize()
     self.AltDriftNextPick = CurTime() + math.Rand(10, 25)
     self.AltDriftRange    = 500
     self.AltDriftLerp     = 0.002
-
-    self.SmoothedRoll  = 0
-    self.SmoothedPitch = 0
 
     -- Tumble state
     self.IsTumbling        = false
@@ -204,7 +193,7 @@ function ENT:Initialize()
     self.VIKHR_MuzzleIndex = 1
 
     if not HasGred() then
-        self:Debug("WARNING: Gredwitch Base not detected -- weapons disabled")
+        self:Debug("WARNING: Gredwitch Base not detected — weapons disabled")
     end
 
     self:Debug("TB-2 spawned at " .. tostring(spawnPos))
@@ -247,9 +236,11 @@ function ENT:StartTumble()
     local gnd = self:FindGround(self:GetPos())
     if gnd ~= -1 then self.TumbleGroundZ = gnd end
 
-    -- Use flightYaw (true travel direction). self.ang.y = flightYaw + MODEL_YAW_OFFSET
-    -- so GetForward() points opposite to travel. Reconstruct real travel vector.
-    local travelFwd = Angle(0, self.flightYaw, 0):Forward()
+    -- GetForward() is aligned to self.ang which already has the +70 model offset,
+    -- so it does NOT point in the travel direction. Reconstruct travel forward
+    -- from self.ang.y minus the 70-degree offset that was baked in at init.
+    local travelYaw = self.ang.y - 70
+    local travelFwd = Angle(0, travelYaw, 0):Forward()
     local speed     = self.Speed or 220
 
     self.TumbleVelocity = Vector(
@@ -400,7 +391,7 @@ end
 function ENT:PhysicsUpdate(phys)
     if not self.DieTime or not self.sky then return end
 
-    -- ---- TUMBLE PATH (straight copy from AN-71) ----
+    -- ---- TUMBLE PATH ----
     if self.IsTumbling then
         if self.TumbleCrashed then return end
 
@@ -412,8 +403,6 @@ function ENT:PhysicsUpdate(phys)
         local pos    = self:GetPos()
         local newPos = pos + self.TumbleVelocity * dt
 
-        -- Tumble angles spin freely -- MODEL_YAW_OFFSET is NOT applied here.
-        -- The offset only matters during normal flight to align the mesh.
         local av   = self.TumbleAngVelocity
         local newP = self.ang.p + av.x * dt
         local newY = self.ang.y + av.y * dt
@@ -434,9 +423,7 @@ function ENT:PhysicsUpdate(phys)
     -- ---- NORMAL FLIGHT PATH ----
 
     local pos = self:GetPos()
-    local dt  = engine.TickInterval()
 
-    -- Altitude drift
     if CurTime() >= self.AltDriftNextPick then
         self.AltDriftTarget   = self.sky + math.Rand(-self.AltDriftRange, self.AltDriftRange)
         self.AltDriftNextPick = CurTime() + math.Rand(10, 25)
@@ -447,56 +434,28 @@ function ENT:PhysicsUpdate(phys)
     local jitter     = math.sin(self.JitterPhase) * self.JitterAmplitude
     local liveAlt    = self.AltDriftCurrent + jitter
 
-    -- Orbit steering -- only ever modifies flightYaw, never self.ang.y directly
-    if Vector(pos.x, pos.y, 0):Distance(Vector(self.CenterPos.x, self.CenterPos.y, 0)) > self.OrbitRadius
-        and (self.TurnDelay or 0) < CurTime() then
-        self.flightYaw = self.flightYaw + 0.1
+    self:SetPos(Vector(pos.x, pos.y, liveAlt))
+    self:SetAngles(self.ang)
+
+    if IsValid(phys) then
+        phys:SetVelocity(self:GetForward() * self.Speed)
+    end
+
+    local dist = Vector(pos.x, pos.y, 0):Distance(Vector(self.CenterPos.x, self.CenterPos.y, 0))
+
+    if dist > self.OrbitRadius and (self.TurnDelay or 0) < CurTime() then
+        self.ang       = self.ang + Angle(0, 0.1, 0)
         self.TurnDelay = CurTime() + 0.02
     end
 
-    -- Sky-wall avoidance
-    local fwdDir = Angle(0, self.flightYaw, 0):Forward()
-    if util.QuickTrace(pos, fwdDir * 3000, self).HitSky then
-        self.flightYaw = self.flightYaw + 0.3
-        fwdDir = Angle(0, self.flightYaw, 0):Forward()
-    end
-
-    -- Roll / pitch smoothing
-    local rawYawDelta  = math.NormalizeAngle(self.flightYaw - (self.PrevYaw or self.flightYaw))
-    self.PrevYaw       = self.flightYaw
-
-    local targetRoll   = math.Clamp(rawYawDelta * -20, -20, 20)
-    self.SmoothedRoll  = Lerp(rawYawDelta ~= 0 and 0.12 or 0.04, self.SmoothedRoll, targetRoll)
-
-    local vel          = IsValid(phys) and phys:GetVelocity() or Vector(0,0,0)
-    local forwardSpeed = vel:Dot(fwdDir)
-    local speedRatio   = math.Clamp(forwardSpeed / self.Speed, 0, 1)
-    self.SmoothedPitch = Lerp(0.04, self.SmoothedPitch, math.Clamp(speedRatio * 12, -15, 15))
-
-    -- MODEL_YAW_OFFSET applied here unconditionally -- cannot be overridden by steering
-    self.ang = Angle(self.SmoothedPitch, self.flightYaw + MODEL_YAW_OFFSET, self.SmoothedRoll)
-
-    local newPos = pos + fwdDir * self.Speed * dt
-    newPos.z = Lerp(0.08, pos.z, liveAlt)
-
-    self:SetPos(newPos)
-    self:SetAngles(self.ang)
-    if IsValid(phys) then
-        phys:SetPos(newPos)
-        phys:SetAngles(self.ang)
-        phys:SetVelocity(fwdDir * self.Speed)
+    local tr = util.QuickTrace(self:GetPos(), self:GetForward() * 3000, self)
+    if tr.HitSky then
+        self.ang = self.ang + Angle(0, 0.3, 0)
     end
 
     if not self:IsInWorld() then
-        self:Debug("Out of world -- rescue warp")
-        local safePos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky)
-        self:SetPos(safePos)
-        self.flightYaw = self.CallDir:Angle().y
-        self.ang = Angle(0, self.flightYaw + MODEL_YAW_OFFSET, 0)
-        if IsValid(phys) then
-            phys:SetPos(safePos)
-            phys:SetVelocity(Vector(0,0,0))
-        end
+        self:Debug("Out of world — removing")
+        self:Remove()
     end
 end
 
@@ -575,7 +534,7 @@ function ENT:PickNewWeapon(ct)
 end
 
 -- ============================================================
--- SLOT 1 -- MAM-L / S-8 salvo  (gb_s8kom_rocket)
+-- SLOT 1 — MAM-L / S-8 salvo  (gb_s8kom_rocket)
 -- ============================================================
 
 function ENT:UpdateS8Salvo(ct)
@@ -657,7 +616,7 @@ function ENT:UpdateS8Salvo(ct)
 end
 
 -- ============================================================
--- SLOT 2 -- MAM-C / Vikhr ATGM  (gb_9k121_rocket)
+-- SLOT 2 — MAM-C / Vikhr ATGM  (gb_9k121_rocket)
 -- ============================================================
 
 function ENT:UpdateVikhr(ct)
@@ -751,7 +710,6 @@ function ENT:UpdateVikhr(ct)
     rocket.OnExplode = function(s, pos, normal)
         if oldExplode then oldExplode(s, pos, normal) end
         if s.IdleSound then s.IdleSound:Stop() end
-
         local hitPos = pos or s:GetPos()
         local ed1 = EffectData()
         ed1:SetOrigin(hitPos) ed1:SetScale(4) ed1:SetMagnitude(4) ed1:SetRadius(400)
