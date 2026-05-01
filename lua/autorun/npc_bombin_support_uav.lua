@@ -15,7 +15,7 @@ if SERVER then
     local cv_cooldown = CreateConVar("npc_bombinuav_cooldown",  "70",   SHARED_FLAGS, "Cooldown per NPC after calling")
     local cv_max_dist = CreateConVar("npc_bombinuav_max_dist",  "3500", SHARED_FLAGS, "Max call distance")
     local cv_min_dist = CreateConVar("npc_bombinuav_min_dist",  "400",  SHARED_FLAGS, "Min call distance")
-    local cv_delay    = CreateConVar("npc_bombinuav_delay",     "6",    SHARED_FLAGS, "Flare → UAV arrival delay")
+    local cv_delay    = CreateConVar("npc_bombinuav_delay",     "6",    SHARED_FLAGS, "Flare to UAV arrival delay")
     local cv_life     = CreateConVar("npc_bombinuav_lifetime",  "60",   SHARED_FLAGS, "UAV lifetime seconds")
     local cv_speed    = CreateConVar("npc_bombinuav_speed",     "220",  SHARED_FLAGS, "UAV forward speed HU/s")
     local cv_radius   = CreateConVar("npc_bombinuav_radius",    "2800", SHARED_FLAGS, "Orbit radius HU")
@@ -43,6 +43,13 @@ if SERVER then
         for _, ply in ipairs(player.GetHumans()) do
             if IsValid(ply) then ply:PrintMessage(HUD_PRINTCONSOLE, full) end
         end
+    end
+
+    -- Returns a random flat (z=0) unit vector so each spawn
+    -- enters the orbit from a unique angle, same as AN-71.
+    local function RandomFlatDir()
+        local ang = math.Rand(0, 360)
+        return Vector(math.cos(math.rad(ang)), math.sin(math.rad(ang)), 0)
     end
 
     local function CheckSkyAbove(pos)
@@ -94,7 +101,9 @@ if SERVER then
         return flare
     end
 
-    local function SpawnSupportUAVAtPos(centerPos, callDir)
+    -- callDir is a random flat direction so no two UAVs share the same
+    -- orbit entry angle (same pattern as AN-71 spawner).
+    local function SpawnSupportUAVAtPos(centerPos)
         if not scripted_ents.GetStored("ent_bombin_support_uav") then
             BSP_Debug("ent_bombin_support_uav not registered")
             return false
@@ -106,10 +115,12 @@ if SERVER then
             return false
         end
 
+        local randomDir = RandomFlatDir()
+
         uav:SetPos(centerPos)
-        uav:SetAngles(callDir:Angle())
+        uav:SetAngles(randomDir:Angle())
         uav:SetVar("CenterPos",    centerPos)
-        uav:SetVar("CallDir",      callDir)
+        uav:SetVar("CallDir",      randomDir)
         uav:SetVar("Lifetime",     cv_life:GetFloat())
         uav:SetVar("Speed",        cv_speed:GetFloat())
         uav:SetVar("OrbitRadius",  cv_radius:GetFloat())
@@ -122,7 +133,7 @@ if SERVER then
             return false
         end
 
-        BSP_Debug("TB-2 spawned at " .. tostring(centerPos))
+        BSP_Debug("TB-2 spawned at " .. tostring(centerPos) .. " dir " .. tostring(randomDir))
         return true
     end
 
@@ -137,21 +148,14 @@ if SERVER then
             BSP_Debug("No open sky above target") return false
         end
 
-        local callDir = targetPos - npc:GetPos()
-        callDir.z = 0
-        if callDir:LengthSqr() <= 1 then callDir = npc:GetForward() callDir.z = 0 end
-        if callDir:LengthSqr() <= 1 then callDir = Vector(1, 0, 0) end
-        callDir:Normalize()
-
         local flare = ThrowSupportFlare(npc, targetPos)
         if not IsValid(flare) then BSP_Debug("Flare failed") return false end
 
         local fallbackPos = Vector(targetPos.x, targetPos.y, targetPos.z)
-        local storedDir   = Vector(callDir.x, callDir.y, callDir.z)
 
         timer.Simple(cv_delay:GetFloat(), function()
             local centerPos = IsValid(flare) and flare:GetPos() or fallbackPos
-            SpawnSupportUAVAtPos(centerPos, storedDir)
+            SpawnSupportUAVAtPos(centerPos)
         end)
 
         return true
@@ -202,7 +206,7 @@ if SERVER then
 end -- SERVER
 
 -- ============================================================
--- CLIENT — flare blue dynamic light
+-- CLIENT -- flare blue dynamic light
 -- ============================================================
 
 if CLIENT then
