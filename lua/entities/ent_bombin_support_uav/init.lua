@@ -4,7 +4,7 @@ include("shared.lua")
 
 -- Permanent yaw correction so the TB-2 mesh faces the direction of travel.
 -- Applied unconditionally every tick: self.ang.y = flightYaw + MODEL_YAW_OFFSET.
-local MODEL_YAW_OFFSET = 70
+local MODEL_YAW_OFFSET = 0
 
 -- ============================================================
 -- GRED GUARD
@@ -125,21 +125,14 @@ function ENT:Initialize()
     self.DieTime   = CurTime() + self.Lifetime
     self.SpawnTime = CurTime()
 
-    -- ---- Orbit setup (same logic as AN-71) ----
-    -- Pick a random orbit direction (CW or CCW) each spawn.
+    -- ---- Orbit setup ----
+    -- Coin-flip CW vs CCW. Use CallDir:Angle():Right() as the tangent base so
+    -- the tangent is always perpendicular to the approach direction and the
+    -- OrbitDirection multiplier is the ONLY thing that decides left vs right.
+    -- The old VectorRand()+dot-flip approach accidentally forced the same
+    -- half-plane every spawn, overriding OrbitDirection.
     self.OrbitDirection = (math.random(2) == 1) and 1 or -1
-
-    -- Build a tangent vector aligned with CallDir but biased by OrbitDirection.
-    local outward = VectorRand()
-    outward.z = math.Rand(-0.08, 0.08)
-    outward:Normalize()
-    local orbitNormal = Vector(0, 0, 1)
-    local tangent = orbitNormal:Cross(outward)
-    tangent.z = 0
-    if tangent:LengthSqr() < 0.001 then tangent = Vector(1,0,0) end
-    tangent:Normalize()
-    if tangent:Dot(self.CallDir) < 0 then tangent = -tangent end
-    self.OrbitTangent = tangent * self.OrbitDirection
+    self.OrbitTangent   = self.CallDir:Angle():Right() * self.OrbitDirection
 
     -- Orbit steering gains
     self.RadialGain   = 0.42
@@ -171,7 +164,7 @@ function ENT:Initialize()
     self:SetNWInt("MaxHP", self.MaxHP)
 
     -- flightYaw is the pure travel direction.
-    -- self.ang.y is always flightYaw + MODEL_YAW_OFFSET.
+    -- self.ang.y is always flightYaw + MODEL_YAW_OFFSET (0).
     self.flightYaw = self.OrbitTangent:Angle().y
     self.PrevYaw   = self.flightYaw
     self.ang       = Angle(0, self.flightYaw + MODEL_YAW_OFFSET, 0)
@@ -269,7 +262,6 @@ function ENT:StartTumble()
     local gnd = self:FindGround(self:GetPos())
     if gnd ~= -1 then self.TumbleGroundZ = gnd end
 
-    -- flightYaw is the real travel direction — use it directly.
     local travelFwd = Angle(0, self.flightYaw, 0):Forward()
     local speed     = self.Speed or 220
 
@@ -444,8 +436,11 @@ function ENT:PhysicsUpdate(phys)
     if CurTime() >= self.DieTime then self:Remove() return end
 
     -- ---- NORMAL FLIGHT PATH ----
-    -- Position is integrated here and written once. No double-move:
-    -- we do NOT call phys:SetVelocity so Havok never adds a second displacement.
+    -- Position is integrated here and written once via SetPos/SetAngles.
+    -- phys:SetVelocity is intentionally NOT called during normal flight:
+    -- calling both SetPos and SetVelocity causes Havok to move the entity
+    -- twice per tick (SetPos + velocity integration), producing the
+    -- visible teleport/stutter at speed.
 
     local pos = self:GetPos()
     local dt  = engine.TickInterval()
@@ -459,7 +454,7 @@ function ENT:PhysicsUpdate(phys)
     self.JitterPhase     = self.JitterPhase + 0.03
     local liveAlt = self.AltDriftCurrent + math.sin(self.JitterPhase) * self.JitterAmplitude
 
-    -- ---- Orbit steering (same algorithm as AN-71) ----
+    -- ---- Orbit steering ----
     local flatPos    = Vector(pos.x, pos.y, 0)
     local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
     local toCenter   = flatCenter - flatPos
@@ -481,7 +476,7 @@ function ENT:PhysicsUpdate(phys)
     local desiredDir = tangentDir + radialDir * radialError * self.RadialGain
 
     -- Sky-wall avoidance using the real travel direction
-    local fwdProbe = Angle(0, self.flightYaw, 0):Forward()
+    local fwdProbe  = Angle(0, self.flightYaw, 0):Forward()
     local probeDist = math.max(1000, self.Speed * 5)
     local trFwd   = util.QuickTrace(pos, fwdProbe * probeDist, self)
     local trLeft  = util.QuickTrace(pos, fwdProbe:Angle():Right() * -700 + fwdProbe * 500, self)
@@ -501,7 +496,6 @@ function ENT:PhysicsUpdate(phys)
     if desiredDir:LengthSqr() <= 0.001 then desiredDir = tangentDir end
     desiredDir:Normalize()
 
-    -- Rate-limited yaw step toward desiredDir
     local desiredYaw = desiredDir:Angle().y
     local yawDiff    = math.NormalizeAngle(desiredYaw - self.flightYaw)
     local maxStep    = self.MaxTurnRate * dt
@@ -514,14 +508,13 @@ function ENT:PhysicsUpdate(phys)
     local targetRoll   = math.Clamp(rawYawDelta * -2.0, -18, 18)
     self.SmoothedRoll  = Lerp(math.abs(rawYawDelta) > 0.01 and 0.10 or 0.04, self.SmoothedRoll, targetRoll)
 
-    local fwdDir   = Angle(0, self.flightYaw, 0):Forward()
+    local fwdDir       = Angle(0, self.flightYaw, 0):Forward()
     local climbDelta   = math.Clamp((liveAlt - pos.z) / 400, -1, 1)
     self.SmoothedPitch = Lerp(0.04, self.SmoothedPitch, math.Clamp(climbDelta * 6, -8, 8))
 
-    -- MODEL_YAW_OFFSET applied unconditionally here
     self.ang = Angle(self.SmoothedPitch, self.flightYaw + MODEL_YAW_OFFSET, self.SmoothedRoll)
 
-    -- Integrate position once — no phys:SetVelocity to avoid double-move
+    -- Single position integration — no phys:SetVelocity
     local newPos = pos + fwdDir * self.Speed * dt
     newPos.z = Lerp(0.08, pos.z, liveAlt)
 
@@ -541,16 +534,13 @@ function ENT:PhysicsUpdate(phys)
     if IsValid(phys) then
         phys:SetPos(newPos)
         phys:SetAngles(self.ang)
-        -- SetVelocity only so the physics engine knows the approximate speed
-        -- for collision response — we never let it integrate position.
-        phys:SetVelocity(fwdDir * self.Speed)
     end
 
     if not self:IsInWorld() then
         self:Debug("Out of world — center recovery")
         local safePos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky)
         self:SetPos(safePos)
-        if IsValid(phys) then phys:SetPos(safePos) phys:SetVelocity(Vector(0,0,0)) end
+        if IsValid(phys) then phys:SetPos(safePos) end
     end
 end
 
