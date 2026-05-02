@@ -234,7 +234,7 @@ function ENT:Initialize()
     self.VIKHR_MuzzleIndex = 1
 
     if not HasGred() then
-        self:Debug("WARNING: Gredwitch Base not detected — weapons disabled")
+        self:Debug("WARNING: Gredwitch Base not detected - weapons disabled")
     end
 
     self:Debug("TB-2 spawned at " .. tostring(spawnPos) .. " OrbitDirection=" .. self.OrbitDirection)
@@ -564,7 +564,7 @@ function ENT:PhysicsUpdate(phys)
 
     -- OOB guard: steer toward center and hold position for one tick.
     if not util.IsInWorld(newPos) then
-        self:Debug("OOB guard fired -- steering to center")
+        self:Debug("OOB guard fired - steering to center")
         local toC = flatCenter - Vector(pos.x, pos.y, 0)
         toC.z = 0
         if toC:LengthSqr() < 0.001 then toC = Vector(-fwdProbe.x, -fwdProbe.y, 0) end
@@ -582,7 +582,7 @@ function ENT:PhysicsUpdate(phys)
 
     -- Last-resort recovery if entity somehow left the world.
     if not self:IsInWorld() then
-        self:Debug("Out of world -- center recovery")
+        self:Debug("Out of world - center recovery")
         local safePos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky)
         self:SetPos(safePos)
     end
@@ -658,7 +658,7 @@ function ENT:PickNewWeapon(ct)
 end
 
 -- ============================================================
--- SLOT 1 — S-8 salvo
+-- SLOT 1 - S-8 salvo
 -- ============================================================
 
 function ENT:UpdateS8Salvo(ct)
@@ -715,7 +715,7 @@ function ENT:UpdateS8Salvo(ct)
 end
 
 -- ============================================================
--- SLOT 2 — Vikhr ATGM
+-- SLOT 2 - Vikhr ATGM
 -- ============================================================
 
 function ENT:UpdateVikhr(ct)
