@@ -4,7 +4,29 @@ include("shared.lua")
 
 -- Permanent yaw correction so the TB-2 mesh faces the direction of travel.
 -- Applied unconditionally every tick: self.ang.y = flightYaw + MODEL_YAW_OFFSET.
+-- TB-2 mesh is NOT flipped, so offset is 0.  Roll sign is therefore NEGATED
+-- relative to AN-71 (which has offset 180 and a mirrored roll axis).
 local MODEL_YAW_OFFSET = 0
+
+-- ============================================================
+-- ROLL CONSTANTS
+-- TB-2 Bayraktar UAV -- lighter and more agile than AN-71.
+--
+-- MODEL_YAW_OFFSET = 0 means the mesh roll axis is NOT mirrored.
+-- positive Angle.r = bank RIGHT from pilot POV.
+-- positive turnRate = turning left.
+-- For left turn: left wing must drop -> Angle.r must be NEGATIVE.
+-- Therefore negate turnRate for both sustained and transient.
+--
+-- At settled orbit turnRate is roughly 5-8 deg/s.
+-- ROLL_SUSTAINED_GAIN = 2.2 gives:
+--   5 deg/s -> 11 deg bank,  8 deg/s -> 17 deg bank.
+-- ============================================================
+local ROLL_SUSTAINED_GAIN = 2.2
+local ROLL_TRANSIENT_GAIN = 55.0
+local ROLL_MAX            = 22.0   -- UAV is lighter; cap slightly lower
+local ROLL_LERP_IN        = 0.08
+local ROLL_LERP_OUT       = 0.012
 
 -- ============================================================
 -- GRED GUARD
@@ -126,20 +148,16 @@ function ENT:Initialize()
     self.SpawnTime = CurTime()
 
     -- ---- Orbit setup ----
-    -- Coin-flip CW vs CCW. Use CallDir:Angle():Right() as the tangent base so
-    -- the tangent is always perpendicular to the approach direction and the
-    -- OrbitDirection multiplier is the ONLY thing that decides left vs right.
-    -- The old VectorRand()+dot-flip approach accidentally forced the same
-    -- half-plane every spawn, overriding OrbitDirection.
     self.OrbitDirection = (math.random(2) == 1) and 1 or -1
     self.OrbitTangent   = self.CallDir:Angle():Right() * self.OrbitDirection
 
-    -- Orbit steering gains
     self.RadialGain   = 0.42
     self.SkyAvoidGain = 0.65
-    self.MaxTurnRate  = 28   -- deg/s, slightly tighter than AN-71 for the slower UAV
+    self.MaxTurnRate  = 28
 
-    -- Spawn offset along tangent so the UAV enters the area naturally
+    -- Roll state: store previous turn rate for transient component
+    self.PrevTurnRate = 0
+
     local spawnOffset = self.OrbitTangent * (-self.OrbitRadius * math.Rand(0.55, 0.95))
     local spawnPos    = self.CenterPos + spawnOffset
     spawnPos = Vector(spawnPos.x, spawnPos.y, self.sky)
@@ -163,10 +181,7 @@ function ENT:Initialize()
     self:SetNWInt("HP",    self.MaxHP)
     self:SetNWInt("MaxHP", self.MaxHP)
 
-    -- flightYaw is the pure travel direction.
-    -- self.ang.y is always flightYaw + MODEL_YAW_OFFSET (0).
     self.flightYaw = self.OrbitTangent:Angle().y
-    self.PrevYaw   = self.flightYaw
     self.ang       = Angle(0, self.flightYaw + MODEL_YAW_OFFSET, 0)
     self:SetAngles(self.ang)
 
@@ -406,6 +421,7 @@ function ENT:PhysicsUpdate(phys)
     if not self.DieTime or not self.sky then return end
 
     -- ---- TUMBLE PATH ----
+    -- Only here do we call phys:Set* directly to override Havok kinematics.
     if self.IsTumbling then
         if self.TumbleCrashed then return end
 
@@ -417,8 +433,8 @@ function ENT:PhysicsUpdate(phys)
         local pos    = self:GetPos()
         local newPos = pos + self.TumbleVelocity * dt
 
-        local av   = self.TumbleAngVelocity
-        self.ang   = Angle(
+        local av = self.TumbleAngVelocity
+        self.ang = Angle(
             self.ang.p + av.x * dt,
             self.ang.y + av.y * dt,
             self.ang.r + av.z * dt
@@ -435,32 +451,39 @@ function ENT:PhysicsUpdate(phys)
 
     if CurTime() >= self.DieTime then self:Remove() return end
 
-    -- ---- NORMAL FLIGHT PATH ----
-    -- Position is integrated here and written once via SetPos/SetAngles.
-    -- phys:SetVelocity is intentionally NOT called during normal flight:
-    -- calling both SetPos and SetVelocity causes Havok to move the entity
-    -- twice per tick (SetPos + velocity integration), producing the
-    -- visible teleport/stutter at speed.
-
+    -- ============================================================
+    -- NORMAL FLIGHT
+    --
+    -- Position is integrated here and written ONCE via SetPos/SetAngles.
+    -- phys:SetPos / phys:SetVelocity are intentionally NOT called during
+    -- normal flight.  Calling both SetPos and phys:Set* causes Havok to
+    -- move the entity twice per tick, producing the visible teleport stutter.
+    -- ============================================================
     local pos = self:GetPos()
     local dt  = engine.TickInterval()
 
-    -- Altitude drift
+    -- ---- Altitude drift ----
     if CurTime() >= self.AltDriftNextPick then
-        self.AltDriftTarget   = self.sky + math.Rand(-self.AltDriftRange, self.AltDriftRange)
+        -- Clamped to [sky - AltDriftRange, sky] so the UAV never drifts
+        -- above its spawn altitude.
+        self.AltDriftTarget   = self.sky - math.Rand(0, self.AltDriftRange)
         self.AltDriftNextPick = CurTime() + math.Rand(10, 25)
     end
     self.AltDriftCurrent = Lerp(self.AltDriftLerp, self.AltDriftCurrent, self.AltDriftTarget)
     self.JitterPhase     = self.JitterPhase + 0.03
-    local liveAlt = self.AltDriftCurrent + math.sin(self.JitterPhase) * self.JitterAmplitude
+    local liveAlt = math.Clamp(
+        self.AltDriftCurrent + math.sin(self.JitterPhase) * self.JitterAmplitude,
+        self.sky - self.AltDriftRange,
+        self.sky
+    )
 
-    -- ---- Orbit steering ----
+    -- ---- Orbit steering (cross-product controller) ----
     local flatPos    = Vector(pos.x, pos.y, 0)
     local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
     local toCenter   = flatCenter - flatPos
     local dist       = toCenter:Length()
 
-    local radialDir = (dist > 1) and (toCenter / dist) or Vector(0,0,0)
+    local radialDir  = (dist > 1) and (toCenter / dist) or Vector(0,0,0)
     local tangentDir = Vector(-radialDir.y, radialDir.x, 0) * self.OrbitDirection
     if tangentDir:LengthSqr() <= 0.001 then
         tangentDir = Angle(0, self.flightYaw, 0):Forward()
@@ -475,7 +498,7 @@ function ENT:PhysicsUpdate(phys)
 
     local desiredDir = tangentDir + radialDir * radialError * self.RadialGain
 
-    -- Sky-wall avoidance using the real travel direction
+    -- Sky-wall avoidance
     local fwdProbe  = Angle(0, self.flightYaw, 0):Forward()
     local probeDist = math.max(1000, self.Speed * 5)
     local trFwd   = util.QuickTrace(pos, fwdProbe * probeDist, self)
@@ -496,51 +519,72 @@ function ENT:PhysicsUpdate(phys)
     if desiredDir:LengthSqr() <= 0.001 then desiredDir = tangentDir end
     desiredDir:Normalize()
 
+    -- Yaw step toward desired direction
     local desiredYaw = desiredDir:Angle().y
     local yawDiff    = math.NormalizeAngle(desiredYaw - self.flightYaw)
     local maxStep    = self.MaxTurnRate * dt
+    local turnRate   = math.Clamp(yawDiff / dt, -self.MaxTurnRate, self.MaxTurnRate)
     self.flightYaw   = self.flightYaw + math.Clamp(yawDiff, -maxStep, maxStep)
 
-    -- Roll / pitch smoothing
-    local rawYawDelta  = math.NormalizeAngle(self.flightYaw - (self.PrevYaw or self.flightYaw))
-    self.PrevYaw       = self.flightYaw
+    -- ============================================================
+    -- COORDINATED TURN ROLL
+    --
+    -- TB-2 has MODEL_YAW_OFFSET = 0: mesh is NOT flipped 180 deg.
+    -- positive Angle.r = bank RIGHT from pilot POV.
+    -- positive turnRate = turning left = left wing must drop.
+    -- Left wing dropping = negative Angle.r.  So negate both components.
+    --
+    -- sustained: constant coordinated bank during steady orbit.
+    -- transient: derivative-driven lean-in pop at turn entry/exit.
+    --            Automatically zero during steady flight.
+    -- ============================================================
+    local turnRateDelta = turnRate - self.PrevTurnRate
+    self.PrevTurnRate   = turnRate
 
-    local targetRoll   = math.Clamp(rawYawDelta * -2.0, -18, 18)
-    self.SmoothedRoll  = Lerp(math.abs(rawYawDelta) > 0.01 and 0.10 or 0.04, self.SmoothedRoll, targetRoll)
+    local sustained  = math.Clamp(-turnRate      * ROLL_SUSTAINED_GAIN, -18, 18)
+    local transient  = math.Clamp(-turnRateDelta * ROLL_TRANSIENT_GAIN, -10, 10)
+    local rollTarget = math.Clamp(sustained + transient, -ROLL_MAX, ROLL_MAX)
 
+    local building = (rollTarget * self.SmoothedRoll >= 0)
+                     and (math.abs(rollTarget) > math.abs(self.SmoothedRoll))
+    local lerpRate = building and ROLL_LERP_IN or ROLL_LERP_OUT
+
+    self.SmoothedRoll = Lerp(lerpRate, self.SmoothedRoll, rollTarget)
+
+    -- ---- Pitch ----
     local fwdDir       = Angle(0, self.flightYaw, 0):Forward()
     local climbDelta   = math.Clamp((liveAlt - pos.z) / 400, -1, 1)
     self.SmoothedPitch = Lerp(0.04, self.SmoothedPitch, math.Clamp(climbDelta * 6, -8, 8))
 
     self.ang = Angle(self.SmoothedPitch, self.flightYaw + MODEL_YAW_OFFSET, self.SmoothedRoll)
 
-    -- Single position integration — no phys:SetVelocity
+    -- ---- Position integration ----
     local newPos = pos + fwdDir * self.Speed * dt
     newPos.z = Lerp(0.08, pos.z, liveAlt)
 
+    -- OOB guard: steer toward center and hold position for one tick.
     if not util.IsInWorld(newPos) then
-        local rescueDir = flatCenter - flatPos
-        rescueDir.z = 0
-        if rescueDir:LengthSqr() <= 0.001 then rescueDir = -fwdDir rescueDir.z = 0 end
-        rescueDir:Normalize()
-        newPos = pos + rescueDir * self.Speed * dt
-        newPos.z = math.min(pos.z, liveAlt)
-        self.flightYaw = rescueDir:Angle().y
+        self:Debug("OOB guard fired -- steering to center")
+        local toC = flatCenter - Vector(pos.x, pos.y, 0)
+        toC.z = 0
+        if toC:LengthSqr() < 0.001 then toC = Vector(-fwdProbe.x, -fwdProbe.y, 0) end
+        toC:Normalize()
+        self.flightYaw = toC:Angle().y
         self.ang = Angle(self.SmoothedPitch, self.flightYaw + MODEL_YAW_OFFSET, self.SmoothedRoll)
+        self:SetPos(pos)
+        self:SetAngles(self.ang)
+        return
     end
 
+    -- Single write -- no phys:Set* calls here.
     self:SetPos(newPos)
     self:SetAngles(self.ang)
-    if IsValid(phys) then
-        phys:SetPos(newPos)
-        phys:SetAngles(self.ang)
-    end
 
+    -- Last-resort recovery if entity somehow left the world.
     if not self:IsInWorld() then
-        self:Debug("Out of world — center recovery")
+        self:Debug("Out of world -- center recovery")
         local safePos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky)
         self:SetPos(safePos)
-        if IsValid(phys) then phys:SetPos(safePos) end
     end
 end
 
