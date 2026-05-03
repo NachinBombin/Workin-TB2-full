@@ -1,50 +1,67 @@
--- Registers ent_bombin_support_uav in the Q menu spawnlist
--- Also adds a control panel for ConVar tuning under Utilities
+-- ============================================================
+--  Bayraktar TB-2 UAV Control Panel
+--  lua/autorun/client/cl_bombinuav_menu.lua
+-- ============================================================
 
 if not CLIENT then return end
 
--- ============================================================
--- SPAWNLIST REGISTRATION
--- ============================================================
+-- ----------------------------------------
+--  Color Palette
+-- ----------------------------------------
+local col_bg_panel      = Color(0,   0,   0,   255)
+local col_section_title = Color(210, 210, 210, 255)
+local col_accent        = Color(0,   180, 255, 255)
 
-hook.Add("PopulateContent", "BombinSupportUAV_SpawnMenu", function(pnlContent, tree, node)
-    local node = tree:AddNode("Bombin Support", "icon16/bomb.png")
+-- ----------------------------------------
+--  Colored Section Banners
+-- ----------------------------------------
+local SECTION_COLORS = {
+    ["NPC Call Settings"] = Color(60,  120, 200, 120),
+    ["UAV Behaviour"]     = Color(80,  180, 120, 120),
+    ["Debug"]             = Color(100, 100, 110, 120),
+    ["Manual Spawn"]      = Color(140, 80,  200, 120),
+}
 
-    node:MakePopulator(function(pnlContent)
-        -- Heli slot (if the sister addon is also loaded it shares this tree node)
-        local helisection = vgui.Create("ContentIcon", pnlContent)
-        helisection:SetContentType("entity")
-        helisection:SetSpawnName("ent_bombin_support_heli")
-        helisection:SetName("Support Helicopter")
-        helisection:SetMaterial("entities/ent_bombin_support_heli.png")
-        helisection:SetToolTip("Autonomous KA-50 support helicopter.\nOrbits the target area and engages with 30mm cannon, S-8 rockets and Vikhr ATGMs.")
-        pnlContent:Add(helisection)
+local function AddColoredCategory(panel, text)
+    local bgColor = SECTION_COLORS[text]
+    if not bgColor then
+        panel:Help(text)
+        return
+    end
 
-        -- UAV slot — new entry in the same tree node
-        local uavsection = vgui.Create("ContentIcon", pnlContent)
-        uavsection:SetContentType("entity")
-        uavsection:SetSpawnName("ent_bombin_support_uav")
-        uavsection:SetName("Support UAV (TB-2)")
-        uavsection:SetMaterial("entities/ent_bombin_support_uav.png")
-        uavsection:SetToolTip("Autonomous Bayraktar TB-2 UAV support.\nOrbits silently and engages with MAM-L rocket salvos and MAM-C ATGMs.")
-        pnlContent:Add(uavsection)
-    end)
-end)
+    local cat = vgui.Create("DPanel", panel)
+    cat:SetTall(24)
+    cat:Dock(TOP)
+    cat:DockMargin(0, 8, 0, 4)
+    cat.Paint = function(self, w, h)
+        draw.RoundedBox(4, 0, 0, w, h, bgColor)
+        surface.SetDrawColor(0, 0, 0, 35)
+        surface.DrawOutlinedRect(0, 0, w, h)
+        local textColor = (bgColor.r + bgColor.g + bgColor.b < 200)
+            and Color(255, 255, 255, 255)
+            or  Color(0,   0,   0,   255)
+        draw.SimpleText(
+            text, "DermaDefaultBold",
+            8, h / 2,
+            textColor,
+            TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER
+        )
+    end
+    panel:AddItem(cat)
+end
 
--- ============================================================
--- CONSOLE COMMAND — manual test spawn
--- ============================================================
-
+-- ----------------------------------------
+--  Console Command — manual test spawn
+-- ----------------------------------------
 concommand.Add("bombin_spawnuav", function()
     if not IsValid(LocalPlayer()) then return end
     net.Start("BombinSupportUAV_ManualSpawn")
     net.SendToServer()
 end)
 
--- ============================================================
--- CONTROL PANEL — Q Menu > Utilities > Bombin Support > UAV TB-2
--- ============================================================
-
+-- ----------------------------------------
+--  Tab & Category Registration
+-- ----------------------------------------
 hook.Add("AddToolMenuTabs", "BombinSupportUAV_Tab", function()
     spawnmenu.AddToolTab("Bombin Support", "Bombin Support", "icon16/bomb.png")
 end)
@@ -53,30 +70,62 @@ hook.Add("AddToolMenuCategories", "BombinSupportUAV_Categories", function()
     spawnmenu.AddToolCategory("Bombin Support", "UAV TB-2", "UAV TB-2")
 end)
 
+-- ----------------------------------------
+--  Tool Menu Population
+-- ----------------------------------------
 hook.Add("PopulateToolMenu", "BombinSupportUAV_ToolMenu", function()
-    spawnmenu.AddToolMenuOption("Bombin Support", "UAV TB-2", "bombin_support_uav_settings", "Bayraktar TB-2 Settings", "", "", function(panel)
-        panel:ClearControls()
-        panel:Help("NPC Call Settings")
+    spawnmenu.AddToolMenuOption(
+        "Bombin Support",
+        "UAV TB-2",
+        "bombin_support_uav_settings",
+        "Bayraktar TB-2 Settings",
+        "", "",
+        function(panel)
+            panel:ClearControls()
 
-        panel:CheckBox("Enable NPC calls", "npc_bombinuav_enabled")
+            -- Header banner
+            local header = vgui.Create("DPanel", panel)
+            header:SetTall(32)
+            header:Dock(TOP)
+            header:DockMargin(0, 0, 0, 8)
+            header.Paint = function(self, w, h)
+                draw.RoundedBox(4, 0, 0, w, h, col_bg_panel)
+                surface.SetDrawColor(col_accent)
+                surface.DrawRect(0, h - 2, w, 2)
+                draw.SimpleText(
+                    "Bayraktar TB-2 UAV Controller",
+                    "DermaLarge",
+                    8, h / 2,
+                    col_section_title,
+                    TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER
+                )
+            end
+            panel:AddItem(header)
 
-        panel:NumSlider("Call chance (per check)",     "npc_bombinuav_chance",   0, 1,    2)
-        panel:NumSlider("Check interval (seconds)",   "npc_bombinuav_interval", 1, 60,   0)
-        panel:NumSlider("NPC cooldown (seconds)",     "npc_bombinuav_cooldown", 10, 300, 0)
-        panel:NumSlider("Min call distance (HU)",     "npc_bombinuav_min_dist", 100, 1000, 0)
-        panel:NumSlider("Max call distance (HU)",     "npc_bombinuav_max_dist", 500, 8000, 0)
-        panel:NumSlider("Flare → arrival delay (s)",  "npc_bombinuav_delay",    1,  30,   0)
+            -- ─── NPC Call Settings ─────────────────────────────────
+            AddColoredCategory(panel, "NPC Call Settings")
+            panel:CheckBox("Enable NPC calls",            "npc_bombinuav_enabled")
+            panel:NumSlider("Call chance (per check)",    "npc_bombinuav_chance",   0,   1,    2)
+            panel:NumSlider("Check interval (seconds)",  "npc_bombinuav_interval", 1,   60,   0)
+            panel:NumSlider("NPC cooldown (seconds)",    "npc_bombinuav_cooldown", 10,  300,  0)
+            panel:NumSlider("Min call distance (HU)",    "npc_bombinuav_min_dist", 100, 1000, 0)
+            panel:NumSlider("Max call distance (HU)",    "npc_bombinuav_max_dist", 500, 8000, 0)
+            panel:NumSlider("Flare → arrival delay (s)", "npc_bombinuav_delay",    1,   30,   0)
 
-        panel:Help("UAV Behaviour")
-        panel:NumSlider("Lifetime (seconds)",         "npc_bombinuav_lifetime", 10, 180,  0)
-        panel:NumSlider("Forward speed (HU/s)",       "npc_bombinuav_speed",    50, 600,  0)
-        panel:NumSlider("Orbit radius (HU)",          "npc_bombinuav_radius",   500, 8000, 0)
-        panel:NumSlider("Altitude above ground (HU)", "npc_bombinuav_height",   500, 8000, 0)
+            -- ─── UAV Behaviour ─────────────────────────────────────
+            AddColoredCategory(panel, "UAV Behaviour")
+            panel:NumSlider("Lifetime (seconds)",         "npc_bombinuav_lifetime", 10,  180,  0)
+            panel:NumSlider("Forward speed (HU/s)",       "npc_bombinuav_speed",    50,  600,  0)
+            panel:NumSlider("Orbit radius (HU)",          "npc_bombinuav_radius",   500, 8000, 0)
+            panel:NumSlider("Altitude above ground (HU)", "npc_bombinuav_height",   500, 8000, 0)
 
-        panel:Help("Debug")
-        panel:CheckBox("Enable debug prints", "npc_bombinuav_announce")
+            -- ─── Debug ─────────────────────────────────────────────
+            AddColoredCategory(panel, "Debug")
+            panel:CheckBox("Enable debug prints", "npc_bombinuav_announce")
 
-        panel:Help("Manual spawn (for testing)")
-        panel:Button("Spawn TB-2 UAV now", "bombin_spawnuav")
-    end)
+            -- ─── Manual Spawn ──────────────────────────────────────
+            AddColoredCategory(panel, "Manual Spawn")
+            panel:Button("Spawn TB-2 UAV now", "bombin_spawnuav")
+        end
+    )
 end)
