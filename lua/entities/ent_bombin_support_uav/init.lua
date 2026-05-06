@@ -66,6 +66,10 @@ local SOUND_ROCKET_IDLE = "rocket_idle.wav"
 
 local CFG_WeaponWindow = 10
 
+-- Peaceful mode cooldown between weapon runs (seconds)
+local PEACEFUL_MIN = 5
+local PEACEFUL_MAX = 9
+
 local CFG_S8_Delay        = 0.4
 local CFG_S8_Count        = 4
 local CFG_S8_Scatter      = 800
@@ -224,6 +228,10 @@ function ENT:Initialize()
 
     self.CurrentWeapon   = nil
     self.WeaponWindowEnd = 0
+    -- Peaceful mode state
+    self.IsPeaceful      = false
+    self.PeacefulUntil   = 0
+    self._PendingWeapon  = nil
 
     self.S8_ShotsFired  = 0
     self.S8_NextShot    = 0
@@ -421,7 +429,6 @@ function ENT:PhysicsUpdate(phys)
     if not self.DieTime or not self.sky then return end
 
     -- ---- TUMBLE PATH ----
-    -- Only here do we call phys:Set* directly to override Havok kinematics.
     if self.IsTumbling then
         if self.TumbleCrashed then return end
 
@@ -451,21 +458,10 @@ function ENT:PhysicsUpdate(phys)
 
     if CurTime() >= self.DieTime then self:Remove() return end
 
-    -- ============================================================
-    -- NORMAL FLIGHT
-    --
-    -- Position is integrated here and written ONCE via SetPos/SetAngles.
-    -- phys:SetPos / phys:SetVelocity are intentionally NOT called during
-    -- normal flight.  Calling both SetPos and phys:Set* causes Havok to
-    -- move the entity twice per tick, producing the visible teleport stutter.
-    -- ============================================================
     local pos = self:GetPos()
     local dt  = engine.TickInterval()
 
-    -- ---- Altitude drift ----
     if CurTime() >= self.AltDriftNextPick then
-        -- Clamped to [sky - AltDriftRange, sky] so the UAV never drifts
-        -- above its spawn altitude.
         self.AltDriftTarget   = self.sky - math.Rand(0, self.AltDriftRange)
         self.AltDriftNextPick = CurTime() + math.Rand(10, 25)
     end
@@ -477,7 +473,6 @@ function ENT:PhysicsUpdate(phys)
         self.sky
     )
 
-    -- ---- Orbit steering (cross-product controller) ----
     local flatPos    = Vector(pos.x, pos.y, 0)
     local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
     local toCenter   = flatCenter - flatPos
@@ -498,7 +493,6 @@ function ENT:PhysicsUpdate(phys)
 
     local desiredDir = tangentDir + radialDir * radialError * self.RadialGain
 
-    -- Sky-wall avoidance
     local fwdProbe  = Angle(0, self.flightYaw, 0):Forward()
     local probeDist = math.max(1000, self.Speed * 5)
     local trFwd   = util.QuickTrace(pos, fwdProbe * probeDist, self)
@@ -519,25 +513,12 @@ function ENT:PhysicsUpdate(phys)
     if desiredDir:LengthSqr() <= 0.001 then desiredDir = tangentDir end
     desiredDir:Normalize()
 
-    -- Yaw step toward desired direction
     local desiredYaw = desiredDir:Angle().y
     local yawDiff    = math.NormalizeAngle(desiredYaw - self.flightYaw)
     local maxStep    = self.MaxTurnRate * dt
     local turnRate   = math.Clamp(yawDiff / dt, -self.MaxTurnRate, self.MaxTurnRate)
     self.flightYaw   = self.flightYaw + math.Clamp(yawDiff, -maxStep, maxStep)
 
-    -- ============================================================
-    -- COORDINATED TURN ROLL
-    --
-    -- TB-2 has MODEL_YAW_OFFSET = 0: mesh is NOT flipped 180 deg.
-    -- positive Angle.r = bank RIGHT from pilot POV.
-    -- positive turnRate = turning left = left wing must drop.
-    -- Left wing dropping = negative Angle.r.  So negate both components.
-    --
-    -- sustained: constant coordinated bank during steady orbit.
-    -- transient: derivative-driven lean-in pop at turn entry/exit.
-    --            Automatically zero during steady flight.
-    -- ============================================================
     local turnRateDelta = turnRate - self.PrevTurnRate
     self.PrevTurnRate   = turnRate
 
@@ -551,18 +532,15 @@ function ENT:PhysicsUpdate(phys)
 
     self.SmoothedRoll = Lerp(lerpRate, self.SmoothedRoll, rollTarget)
 
-    -- ---- Pitch ----
     local fwdDir       = Angle(0, self.flightYaw, 0):Forward()
     local climbDelta   = math.Clamp((liveAlt - pos.z) / 400, -1, 1)
     self.SmoothedPitch = Lerp(0.04, self.SmoothedPitch, math.Clamp(climbDelta * 6, -8, 8))
 
     self.ang = Angle(self.SmoothedPitch, self.flightYaw + MODEL_YAW_OFFSET, self.SmoothedRoll)
 
-    -- ---- Position integration ----
     local newPos = pos + fwdDir * self.Speed * dt
     newPos.z = Lerp(0.08, pos.z, liveAlt)
 
-    -- OOB guard: steer toward center and hold position for one tick.
     if not util.IsInWorld(newPos) then
         self:Debug("OOB guard fired - steering to center")
         local toC = flatCenter - Vector(pos.x, pos.y, 0)
@@ -576,11 +554,9 @@ function ENT:PhysicsUpdate(phys)
         return
     end
 
-    -- Single write -- no phys:Set* calls here.
     self:SetPos(newPos)
     self:SetAngles(self.ang)
 
-    -- Last-resort recovery if entity somehow left the world.
     if not self:IsInWorld() then
         self:Debug("Out of world - center recovery")
         local safePos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky)
@@ -625,14 +601,33 @@ function ENT:SpawnMuzzleFX(worldPos)
 end
 
 -- ============================================================
--- WEAPON WINDOW CONTROLLER
+-- WEAPON CYCLE WITH PEACEFUL MODE
 -- ============================================================
 
 function ENT:HandleWeaponWindow(ct)
-    if not self.CurrentWeapon or ct >= self.WeaponWindowEnd then
-        self:PickNewWeapon(ct)
+    -- Gate 1: in peaceful cooldown — wait, then arm next weapon
+    if self.IsPeaceful then
+        if ct >= self.PeacefulUntil then
+            self.IsPeaceful = false
+            self:ArmWeapon(self._PendingWeapon, ct)
+            self._PendingWeapon = nil
+        end
+        return  -- nothing fires while peaceful
     end
 
+    -- Gate 2: no weapon active yet (first call after spawn)
+    if not self.CurrentWeapon then
+        self:EnterPeaceful(ct)
+        return
+    end
+
+    -- Gate 3: weapon window expired — enter peaceful cooldown
+    if ct >= self.WeaponWindowEnd then
+        self:EnterPeaceful(ct)
+        return
+    end
+
+    -- Gate 4: dispatch to active weapon updater
     if self.CurrentWeapon == "s8_salvo" then
         self:UpdateS8Salvo(ct)
     elseif self.CurrentWeapon == "vikhr" then
@@ -640,11 +635,26 @@ function ENT:HandleWeaponWindow(ct)
     end
 end
 
-function ENT:PickNewWeapon(ct)
-    local roll = math.random(1, 2)
-    self.CurrentWeapon   = (roll == 1) and "s8_salvo" or "vikhr"
+-- Called at the end of every weapon window to begin the peaceful cooldown.
+function ENT:EnterPeaceful(ct)
+    self.CurrentWeapon  = nil
+    self.IsPeaceful     = true
+    self.PeacefulUntil  = ct + math.Rand(PEACEFUL_MIN, PEACEFUL_MAX)
+    self._PendingWeapon = self:RollWeapon()
+    self:Debug("Peaceful for " .. string.format("%.1f", self.PeacefulUntil - ct) .. "s, next: " .. self._PendingWeapon)
+end
+
+-- Rolls and returns a random weapon name string.
+function ENT:RollWeapon()
+    return (math.random(1, 2) == 1) and "s8_salvo" or "vikhr"
+end
+
+-- Arms a weapon and opens its fire window.
+function ENT:ArmWeapon(weapon, ct)
+    weapon = weapon or self:RollWeapon()
+    self.CurrentWeapon   = weapon
     self.WeaponWindowEnd = ct + self.WeaponWindow
-    self:Debug("Weapon: " .. self.CurrentWeapon)
+    self:Debug("Armed: " .. self.CurrentWeapon)
 
     if self.CurrentWeapon == "s8_salvo" then
         self.S8_ShotsFired  = 0
@@ -655,6 +665,11 @@ function ENT:PickNewWeapon(ct)
         self.VIKHR_NextShot    = ct + 1.0
         self.VIKHR_MuzzleIndex = 1
     end
+end
+
+-- Legacy shim kept for external callers / subclasses.
+function ENT:PickNewWeapon(ct)
+    self:EnterPeaceful(ct)
 end
 
 -- ============================================================
