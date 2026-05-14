@@ -1,15 +1,27 @@
 -- ============================================================
 -- CONTRAIL SYSTEM  --  ent_bombin_support_uav (TB2)
--- Single persistent beam trail from the rear of the UAV.
--- Unique hook names to avoid collision with AC-130 / tomahawk.
+-- Three persistent beam trails: tail + left/right wingtips.
+-- Unique hook names to avoid collision with AC-130 / molniya / tomahawk.
+-- ============================================================
+-- Source Engine local-space axes:
+--   X = forward   (nose direction)
+--   Y = right     (starboard = +Y, port = -Y)
+--   Z = up
+--
+-- Emission points:
+--   [1] Tail        : centre-line rear of the fuselage
+--   [2] Left  wing  : port wingtip trailing edge
+--   [3] Right wing  : starboard wingtip trailing edge
 -- ============================================================
 
 local TRAIL_MATERIAL = Material( "trails/smoke" )
 local SAMPLE_RATE    = 0.025   -- 40 fps sampling
 
--- One emission point: rear center of the UAV body.
--- Tune Y value if the trail appears mid-fuselage rather than at the tail.
-local TRAIL_OFFSET = Vector( 0, -110, 0 )
+local TRAIL_POSITIONS = {
+    Vector(   0, -110,   0 ),   -- [1] tail / rear fuselage  (original point, kept)
+    Vector( -20,  -30,   4 ),   -- [2] left  wingtip  (-Y port)
+    Vector(  20,  -30,   4 ),   -- [3] right wingtip  (+Y starboard)
+}
 
 -- Contrail config: thin near UAV, widens behind it.
 local CONTRAIL_CFG = {
@@ -26,9 +38,13 @@ local TB2Trails = {}
 
 local function EnsureRegistered( entIndex )
     if TB2Trails[entIndex] then return end
+    local trails = {}
+    for i = 1, #TRAIL_POSITIONS do
+        trails[i] = { positions = {} }
+    end
     TB2Trails[entIndex] = {
         nextSample = 0,
-        positions  = {},
+        trails     = trails,
     }
 end
 
@@ -76,15 +92,22 @@ hook.Add( "Think", "bombin_tb2_contrail_update", function()
         if Time < state.nextSample then continue end
         state.nextSample = Time + SAMPLE_RATE
 
-        local wpos = LocalToWorld( TRAIL_OFFSET, Angle(0,0,0), ent:GetPos(), ent:GetAngles() )
-        table.insert( state.positions, { time = Time, pos = wpos } )
-        table.sort( state.positions, function( a, b ) return a.time > b.time end )
+        local pos = ent:GetPos()
+        local ang = ent:GetAngles()
+
+        for i, trail in ipairs( state.trails ) do
+            local wpos = LocalToWorld( TRAIL_POSITIONS[i], Angle(0,0,0), pos, ang )
+            table.insert( trail.positions, { time = Time, pos = wpos } )
+            table.sort( trail.positions, function( a, b ) return a.time > b.time end )
+        end
     end
 end )
 
 hook.Add( "PostDrawTranslucentRenderables", "bombin_tb2_contrail_draw", function( bDepth, bSkybox )
     if bSkybox then return end
     for _, state in pairs( TB2Trails ) do
-        DrawBeam( state.positions, CONTRAIL_CFG )
+        for _, trail in ipairs( state.trails ) do
+            DrawBeam( trail.positions, CONTRAIL_CFG )
+        end
     end
 end )
